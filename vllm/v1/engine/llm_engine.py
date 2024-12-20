@@ -1,4 +1,6 @@
-from typing import Dict, List, Mapping, Optional, Type, Union
+from typing import Dict, List, Mapping, Optional, Type, Union, Tuple
+import asyncio
+from concurrent.futures import ThreadPoolExecutor, Future
 
 from typing_extensions import TypeVar
 
@@ -19,6 +21,7 @@ from vllm.transformers_utils.tokenizer_group import (
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
+from vllm.v1.engine import DetokenizerRequest, EngineCoreRequest
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
 
@@ -148,10 +151,26 @@ class LLMEngine:
         priority: int = 0,
     ) -> None:
 
-        # 1) Process raw inputs into the request.
-        detokenizer_req, engine_core_req = self.processor.process_inputs(
-            request_id, prompt, params, arrival_time, lora_request,
-            trace_headers, prompt_adapter_request, priority)
+        # 1) Add the request to a ThreadPoolExecutor to process inputs 
+        # on a separate thread, releasing the GIL.
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            processed_inputs = executor.submit(
+                self.process_inputs,
+                request_id,
+                prompt,
+                params,
+                arrival_time,
+                lora_request,
+                trace_headers,
+                prompt_adapter_request,
+                priority,
+            )
+
+            # Use a separate thread to handle the result of processed inputs
+            executor.submit(self._handle_processed_inputs, processed_inputs)  
+
+    def _handle_processed_inputs(self, processed_inputs: Future[Tuple[DetokenizerRequest, EngineCoreRequest]]):
+        detokenizer_req, engine_core_req = processed_inputs.result() 
 
         # 2) Add the request to Detokenizer.
         self.detokenizer.add_request(detokenizer_req)
